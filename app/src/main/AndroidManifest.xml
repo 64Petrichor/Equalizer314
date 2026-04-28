@@ -99,7 +99,6 @@
             android:name="com.bearinmind.equalizer314.autopreset.AudioDeviceReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="android.intent.action.HEADSET_PLUG" />
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
                 <action android:name="android.hardware.usb.action.USB_DEVICE_DETACHED" />
             </intent-filter>

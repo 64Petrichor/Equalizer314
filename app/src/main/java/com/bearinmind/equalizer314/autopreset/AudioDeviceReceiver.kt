@@ -9,13 +9,15 @@ import android.os.Build
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.bearinmind.equalizer314.state.EqPreferencesManager
 
+
 /**
- * Manifest-declared receiver for wired 3.5mm and USB audio device events.
+ * Manifest-declared receiver for USB audio device events.
  * Wakes briefly to update the pending preset in SharedPreferences and fires
  * a local broadcast so EqService can apply it live if it is running.
  *
- * Bluetooth events cannot be declared in the manifest on API 26+ and are
- * handled dynamically inside EqService instead.
+ * ACTION_HEADSET_PLUG cannot be received by manifest receivers on API 26+;
+ * wired and Bluetooth device changes are handled by AudioDeviceCallback
+ * registered inside EqService instead.
  */
 class AudioDeviceReceiver : BroadcastReceiver() {
 
@@ -24,13 +26,6 @@ class AudioDeviceReceiver : BroadcastReceiver() {
         if (!AutoPresetManager.isEnabled(prefs)) return
 
         when (intent.action) {
-            Intent.ACTION_HEADSET_PLUG -> {
-                val state = intent.getIntExtra("state", -1)
-                if (state == 1) { // plugged in
-                    AutoPresetManager.onDeviceConnected(prefs, "wired_3.5mm", "Wired 3.5mm")
-                    notifyService(context)
-                }
-            }
             UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                 val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)

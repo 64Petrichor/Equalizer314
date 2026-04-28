@@ -1,7 +1,6 @@
 package com.bearinmind.equalizer314.audio
 
 import android.app.*
-import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -18,7 +17,6 @@ import androidx.core.app.NotificationCompat
 import com.bearinmind.equalizer314.MainActivity
 import com.bearinmind.equalizer314.R
 import com.bearinmind.equalizer314.autopreset.AutoPresetManager
-import com.bearinmind.equalizer314.autopreset.PresetAction
 import com.bearinmind.equalizer314.dsp.ParametricEqualizer
 import com.bearinmind.equalizer314.state.EqPreferencesManager
 
@@ -56,31 +54,47 @@ class EqService : Service() {
         }
     }
 
-    // Auto Preset — local broadcast from AudioDeviceReceiver (wired/USB)
+    // Auto Preset — local broadcast from AudioDeviceReceiver (USB manifest receiver)
     private val autoPresetReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             applyPendingAutoPreset()
         }
     }
 
-    // Auto Preset — dynamic callback for Bluetooth events (cannot be declared
-    // in manifest on API 26+)
-    private val btReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
+    // Auto Preset — covers wired and Bluetooth device connects when the
+    // service is running. ACTION_HEADSET_PLUG cannot be received by manifest
+    // receivers on API 26+, and Bluetooth implicit broadcasts are also
+    // restricted — AudioDeviceCallback handles both correctly.
+    private val audioDeviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) {
             if (!AutoPresetManager.isEnabled(eqPrefs)) return
-            if (intent?.action != BluetoothDevice.ACTION_ACL_CONNECTED) return
-            val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            var anyRegistered = false
+            for (info in addedDevices) {
+                val (id, name) = deviceInfoToIdAndName(info) ?: continue
+                AutoPresetManager.onDeviceConnected(eqPrefs, id, name)
+                anyRegistered = true
             }
-            device ?: return
-            val address = device.address ?: return
-            val id = AutoPresetManager.btDeviceId(address)
-            val name = AutoPresetManager.btDisplayName(this@EqService, address)
-            AutoPresetManager.onDeviceConnected(eqPrefs, id, name)
-            applyPendingAutoPreset()
+            if (anyRegistered) applyPendingAutoPreset()
+        }
+    }
+
+    private fun deviceInfoToIdAndName(info: AudioDeviceInfo): Pair<String, String>? {
+        return when (info.type) {
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired_3.5mm" to "Wired 3.5mm"
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> {
+                val address = try { info.address?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
+                val productName = info.productName?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                val id = if (!address.isNullOrBlank()) AutoPresetManager.btDeviceId(address)
+                          else productName?.let { "bt_named:$it" } ?: return null
+                val name = productName ?: address ?: "Bluetooth Device"
+                id to name
+            }
+            // USB devices are handled by the manifest AudioDeviceReceiver which
+            // has access to VID/PID via UsbDevice. Skip here to avoid creating
+            // a duplicate entry with a different key.
+            else -> null
         }
     }
 
@@ -124,21 +138,14 @@ class EqService : Service() {
                 IntentFilter("android.media.VOLUME_CHANGED_ACTION"),
                 RECEIVER_NOT_EXPORTED
             )
-            registerReceiver(
-                btReceiver,
-                IntentFilter(BluetoothDevice.ACTION_ACL_CONNECTED),
-                RECEIVER_NOT_EXPORTED
-            )
         } else {
             registerReceiver(
                 volumeReceiver,
                 IntentFilter("android.media.VOLUME_CHANGED_ACTION")
             )
-            registerReceiver(
-                btReceiver,
-                IntentFilter(BluetoothDevice.ACTION_ACL_CONNECTED)
-            )
         }
+        getSystemService(AudioManager::class.java)
+            .registerAudioDeviceCallback(audioDeviceCallback, null)
         LocalBroadcastManager.getInstance(this).registerReceiver(
             autoPresetReceiver,
             IntentFilter(AutoPresetManager.ACTION_DEVICE_CHANGED)
@@ -188,7 +195,8 @@ class EqService : Service() {
 
     override fun onDestroy() {
         try { unregisterReceiver(volumeReceiver) } catch (_: Exception) {}
-        try { unregisterReceiver(btReceiver) } catch (_: Exception) {}
+        try { getSystemService(AudioManager::class.java)
+            .unregisterAudioDeviceCallback(audioDeviceCallback) } catch (_: Exception) {}
         LocalBroadcastManager.getInstance(this).unregisterReceiver(autoPresetReceiver)
         dynamicsManager.stop()
         Log.d(TAG, "EqService destroyed")

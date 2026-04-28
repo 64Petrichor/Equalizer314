@@ -1744,29 +1744,38 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Case 2: reconcile from current routing (e.g. BT was already connected
-        // when the app launched, before EqService had a chance to register its callback)
+        // when the app launched, before EqService had a chance to register its callback,
+        // or the device was connected while the app was backgrounded without EQ running).
+        // This also creates new entries for devices not yet in the list.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
             val audioManager = getSystemService(android.media.AudioManager::class.java)
             val outputs = audioManager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
-            val devices = com.bearinmind.equalizer314.autopreset.AutoPresetManager.getDevices(prefs)
+            var anyNew = false
             for (info in outputs) {
-                val candidateId = when (info.type) {
+                val (candidateId, candidateName) = when (info.type) {
                     android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                    android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ->
-                        info.address?.takeIf { it.isNotBlank() }?.let {
-                            com.bearinmind.equalizer314.autopreset.AutoPresetManager.btDeviceId(it)
-                        }
+                    android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> {
+                        val address = try { info.address?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
+                        val productName = info.productName?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                        val id = if (!address.isNullOrBlank())
+                            com.bearinmind.equalizer314.autopreset.AutoPresetManager.btDeviceId(address)
+                        else productName?.let { "bt_named:$it" } ?: continue
+                        id to (productName ?: address ?: "Bluetooth Device")
+                    }
                     android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired_3.5mm"
-                    android.media.AudioDeviceInfo.TYPE_USB_DEVICE,
-                    android.media.AudioDeviceInfo.TYPE_USB_HEADSET -> null // USB DAC — id needs UsbDevice; skip here
-                    else -> null
-                } ?: continue
-                val device = devices.firstOrNull { it.id == candidateId } ?: continue
-                if (!device.hidden && device.presetAction != com.bearinmind.equalizer314.autopreset.PresetAction.FLAT
-                    && device.presetName.isNotBlank()) {
-                    applyAutoPresetByName(device.presetName)
-                    return
+                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired_3.5mm" to "Wired 3.5mm"
+                    // USB DAC id needs VID/PID from UsbDevice (manifest receiver handles this)
+                    else -> continue
+                }
+                // Register new device (no-op if already in list)
+                val presetToApply = com.bearinmind.equalizer314.autopreset.AutoPresetManager
+                    .onDeviceConnected(prefs, candidateId, candidateName)
+                if (presetToApply != null && !anyNew) {
+                    anyNew = true
+                    applyAutoPresetByName(presetToApply)
+                } else if (presetToApply == null) {
+                    // Device was already known but may have been seeded this run
+                    anyNew = true
                 }
             }
         }
