@@ -201,26 +201,19 @@ class AutoPresetActivity : AppCompatActivity() {
     }
 
     private fun showPresetOptions(device: AutoPresetDevice) {
-        val currentPresetName = eqPrefs.getPresetName()
-        val hasCurrentPreset = currentPresetName.isNotBlank()
-            && currentPresetName != "Flat"
-            && eqPrefs.getImportedPresetText(currentPresetName) != null
-
-        val options = buildList {
-            add("No effect")
-            add("Choose preset")
-            if (hasCurrentPreset) add("Choose current preset ($currentPresetName)")
-            else add("Choose current preset")
-            add("Prompt with each connect")
-        }
-
+        val options = arrayOf(
+            "No effect",
+            "Choose preset",
+            "Save current EQ as snapshot",
+            "Prompt with each connect",
+        )
         AlertDialog.Builder(this)
             .setTitle(device.displayName)
-            .setItems(options.toTypedArray()) { _, which ->
+            .setItems(options) { _, which ->
                 when (which) {
                     0 -> { device.presetAction = PresetAction.FLAT; device.presetName = ""; save() }
                     1 -> launchAutoEqForDevice(device)
-                    2 -> chooseCurrentPreset(device, currentPresetName, hasCurrentPreset)
+                    2 -> chooseCurrentPreset(device)
                     3 -> { device.presetAction = PresetAction.PROMPT; device.presetName = ""; save() }
                 }
             }.show()
@@ -233,18 +226,65 @@ class AutoPresetActivity : AppCompatActivity() {
         overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
     }
 
-    private fun chooseCurrentPreset(device: AutoPresetDevice, presetName: String, hasPreset: Boolean) {
-        if (!hasPreset) {
-            Toast.makeText(
-                this,
-                "No preset loaded. Select one from AutoEQ & Presets first.",
-                Toast.LENGTH_LONG
-            ).show()
-            return
+    private fun chooseCurrentPreset(device: AutoPresetDevice) {
+        val input = android.widget.EditText(this).apply {
+            hint = "Snapshot name"
+            selectAll()
         }
-        device.presetAction = PresetAction.IMPORT
-        device.presetName = presetName
-        save()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Name this snapshot")
+            .setMessage("Saves the current EQ, preamp, MBC, and limiter settings.")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isBlank()) {
+                    Toast.makeText(this, "Name cannot be empty", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val snapshot = buildSnapshot()
+                eqPrefs.saveFullSnapshot(name, snapshot.toJson())
+                device.presetAction = PresetAction.SNAPSHOT
+                device.presetName = name
+                save()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun buildSnapshot(): FullSnapshotData {
+        val bandCount = eqPrefs.getMbcBandCount()
+        val mbcBands = (0 until bandCount).map { i ->
+            FullSnapshotData.MbcBandSnapshot(
+                enabled   = eqPrefs.getMbcBandEnabled(i),
+                attack    = eqPrefs.getMbcBandAttack(i),
+                release   = eqPrefs.getMbcBandRelease(i),
+                ratio     = eqPrefs.getMbcBandRatio(i),
+                threshold = eqPrefs.getMbcBandThreshold(i),
+                knee      = eqPrefs.getMbcBandKnee(i),
+                noiseGate = eqPrefs.getMbcBandNoiseGate(i),
+                expander  = eqPrefs.getMbcBandExpander(i),
+                preGain   = eqPrefs.getMbcBandPreGain(i),
+                postGain  = eqPrefs.getMbcBandPostGain(i),
+                range     = eqPrefs.getMbcBandRange(i),
+            )
+        }
+        val crossovers = (0 until (bandCount - 1)).map { i ->
+            eqPrefs.getMbcCrossover(i, 1000f)
+        }
+        return FullSnapshotData(
+            bandsJson        = eqPrefs.getBandsJson(),
+            preampGain       = eqPrefs.getPreampGain(),
+            mbcEnabled       = eqPrefs.getMbcEnabled(),
+            mbcBandCount     = bandCount,
+            mbcBands         = mbcBands,
+            mbcCrossovers    = crossovers,
+            limiterEnabled   = eqPrefs.getLimiterEnabled(),
+            limiterAttack    = eqPrefs.getLimiterAttack(),
+            limiterRelease   = eqPrefs.getLimiterRelease(),
+            limiterRatio     = eqPrefs.getLimiterRatio(),
+            limiterThreshold = eqPrefs.getLimiterThreshold(),
+            limiterPostGain  = eqPrefs.getLimiterPostGain(),
+        )
     }
 
     private fun showRenameDialog(device: AutoPresetDevice) {

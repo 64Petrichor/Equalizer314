@@ -41,9 +41,11 @@ class AudioDeviceReceiver : BroadcastReceiver() {
                 }
             }
             UsbManager.ACTION_USB_DEVICE_DETACHED -> {
-                // On detach we just clear the pending preset; EqService handles
-                // the live state (active preset stays applied until next connect).
-                prefs.saveAutoPresetPending(null)
+                // On detach we clear the pending preset and active device ID so
+                // the next connect applies fresh. EqService's AudioDeviceCallback
+                // handles live wired/BT removes via onAudioDevicesRemoved.
+                prefs.clearAutoPresetPending()
+                prefs.saveAutoPresetActiveDeviceId(null)
             }
         }
     }

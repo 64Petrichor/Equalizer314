@@ -30,9 +30,14 @@ object AutoPresetManager {
 
     /**
      * Called when a device connects. Finds or creates its entry, writes the
-     * pending preset key, and returns the preset name to apply (null = Flat/no-op).
+     * pending preset key (as "ACTION:name"), and returns (action, name) to
+     * apply — or null when no preset should be applied (Flat / hidden / unset).
      */
-    fun onDeviceConnected(prefs: EqPreferencesManager, deviceId: String, displayName: String): String? {
+    fun onDeviceConnected(
+        prefs: EqPreferencesManager,
+        deviceId: String,
+        displayName: String,
+    ): Pair<PresetAction, String>? {
         val devices = getDevices(prefs)
         val existing = devices.indexOfFirst { it.id == deviceId }
         val device = if (existing >= 0) {
@@ -46,19 +51,27 @@ object AutoPresetManager {
         }
 
         if (device.hidden) {
-            prefs.saveAutoPresetPending(null)
+            prefs.clearAutoPresetPending()
+            prefs.saveAutoPresetPendingDeviceId(null)
             return null
         }
 
-        val presetToApply = when (device.presetAction) {
-            PresetAction.FLAT -> null
-            PresetAction.PROMPT -> null  // notification handled by caller
-            PresetAction.AUTOEQ, PresetAction.IMPORT, PresetAction.SNAPSHOT ->
-                device.presetName.takeIf { it.isNotBlank() }
+        val result: Pair<PresetAction, String>? = when (device.presetAction) {
+            PresetAction.FLAT, PresetAction.PROMPT -> null
+            PresetAction.AUTOEQ, PresetAction.IMPORT ->
+                device.presetName.takeIf { it.isNotBlank() }?.let { PresetAction.IMPORT to it }
+            PresetAction.SNAPSHOT ->
+                device.presetName.takeIf { it.isNotBlank() }?.let { PresetAction.SNAPSHOT to it }
         }
 
-        prefs.saveAutoPresetPending(presetToApply)
-        return presetToApply
+        if (result != null) {
+            prefs.saveAutoPresetPending(result.first.name, result.second)
+            prefs.saveAutoPresetPendingDeviceId(deviceId)
+        } else {
+            prefs.clearAutoPresetPending()
+            prefs.saveAutoPresetPendingDeviceId(null)
+        }
+        return result
     }
 
     fun usbDeviceId(device: UsbDevice): String {

@@ -17,6 +17,9 @@ import androidx.core.app.NotificationCompat
 import com.bearinmind.equalizer314.MainActivity
 import com.bearinmind.equalizer314.R
 import com.bearinmind.equalizer314.autopreset.AutoPresetManager
+import com.bearinmind.equalizer314.autopreset.FullSnapshotData
+import com.bearinmind.equalizer314.autoeq.AutoEqParser
+import com.bearinmind.equalizer314.autoeq.apoTokenToFilterType
 import com.bearinmind.equalizer314.dsp.ParametricEqualizer
 import com.bearinmind.equalizer314.state.EqPreferencesManager
 
@@ -68,13 +71,25 @@ class EqService : Service() {
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) {
             if (!AutoPresetManager.isEnabled(eqPrefs)) return
-            var anyRegistered = false
+            var anyHasPreset = false
             for (info in addedDevices) {
                 val (id, name) = deviceInfoToIdAndName(info) ?: continue
-                AutoPresetManager.onDeviceConnected(eqPrefs, id, name)
-                anyRegistered = true
+                val result = AutoPresetManager.onDeviceConnected(eqPrefs, id, name)
+                if (result != null) anyHasPreset = true
             }
-            if (anyRegistered) applyPendingAutoPreset()
+            if (anyHasPreset) applyPendingAutoPreset()
+        }
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) {
+            if (!AutoPresetManager.isEnabled(eqPrefs)) return
+            val activeId = eqPrefs.getAutoPresetActiveDeviceId() ?: return
+            for (info in removedDevices) {
+                val (id, _) = deviceInfoToIdAndName(info) ?: continue
+                if (id == activeId) {
+                    eqPrefs.saveAutoPresetActiveDeviceId(null)
+                    break
+                }
+            }
         }
     }
 
@@ -99,26 +114,82 @@ class EqService : Service() {
     }
 
     private fun applyPendingAutoPreset() {
-        val presetName = eqPrefs.getAutoPresetPending() ?: return
-        eqPrefs.saveAutoPresetPending(null)
-        val rawText = eqPrefs.getImportedPresetText(presetName) ?: return
+        val (action, name) = eqPrefs.getAutoPresetPendingPair() ?: return
+        val deviceId = eqPrefs.getAutoPresetPendingDeviceId()
+        eqPrefs.clearAutoPresetPending()
+        eqPrefs.saveAutoPresetPendingDeviceId(null)
+        eqPrefs.saveAutoPresetActiveDeviceId(deviceId)
+        if (action == "SNAPSHOT") applySnapshot(name) else applyImportPreset(name)
+    }
+
+    private fun applyImportPreset(name: String) {
+        val rawText = eqPrefs.getImportedPresetText(name) ?: return
         try {
-            val profile = com.bearinmind.equalizer314.autoeq.AutoEqParser.parse(rawText) ?: return
+            val profile = AutoEqParser.parse(rawText) ?: return
             val eq = ParametricEqualizer()
             eq.clearBands()
             for (f in profile.filters) {
-                val filterType = com.bearinmind.equalizer314.autoeq.apoTokenToFilterType(f.filterType)
-                eq.addBand(f.frequency, f.gain, filterType, f.q.toDouble())
+                eq.addBand(f.frequency, f.gain, apoTokenToFilterType(f.filterType), f.q.toDouble())
             }
             eq.isEnabled = true
-            // Persist so MainActivity.onResume restores the correct UI state.
             val slots = (0 until eq.getBandCount()).toList()
             eqPrefs.saveState(eq, slots)
             eqPrefs.savePreampGain(profile.preampDb)
-            eqPrefs.savePresetName(presetName)
+            eqPrefs.savePresetName(name)
             eqPrefs.saveChannelSideEqEnabled(false)
             eqPrefs.clearLeftRightBands()
             dynamicsManager.updateFromEqualizer(eq)
+        } catch (_: Exception) { }
+    }
+
+    private fun applySnapshot(name: String) {
+        val json = eqPrefs.getFullSnapshot(name) ?: return
+        val snapshot = FullSnapshotData.fromJson(json) ?: return
+        try {
+            val specs = snapshot.toBandSpecs()
+            val eq = ParametricEqualizer()
+            eq.clearBands()
+            for (spec in specs) {
+                eq.addBand(spec.frequency, spec.gain, spec.filterType, spec.q)
+            }
+            for (i in specs.indices) eq.setBandEnabled(i, specs[i].enabled)
+            eq.isEnabled = true
+            val slots = (0 until eq.getBandCount()).toList()
+            eqPrefs.saveState(eq, slots)
+            eqPrefs.savePreampGain(snapshot.preampGain)
+            eqPrefs.savePresetName(name)
+            eqPrefs.saveChannelSideEqEnabled(false)
+            eqPrefs.clearLeftRightBands()
+            dynamicsManager.updateFromEqualizer(eq)
+            // MBC
+            if (snapshot.mbcEnabled) {
+                eqPrefs.saveMbcEnabled(true)
+                eqPrefs.saveMbcBandCount(snapshot.mbcBandCount)
+                snapshot.mbcBands.forEachIndexed { i, b ->
+                    val cutoff = snapshot.mbcCrossovers.getOrElse(i) { 1000f }
+                    eqPrefs.saveMbcBand(i, b.enabled, cutoff, b.attack, b.release, b.ratio,
+                        b.threshold, b.knee, b.noiseGate, b.expander, b.preGain, b.postGain, b.range)
+                }
+                dynamicsManager.mbcEnabled = true
+                dynamicsManager.mbcBandCount = snapshot.mbcBandCount
+                dynamicsManager.applyMbcBands(snapshot.mbcBandParams(), snapshot.mbcCrossoversArray())
+            }
+            // Limiter
+            if (snapshot.limiterEnabled) {
+                eqPrefs.saveLimiterEnabled(true)
+                eqPrefs.saveLimiterAttack(snapshot.limiterAttack)
+                eqPrefs.saveLimiterRelease(snapshot.limiterRelease)
+                eqPrefs.saveLimiterRatio(snapshot.limiterRatio)
+                eqPrefs.saveLimiterThreshold(snapshot.limiterThreshold)
+                eqPrefs.saveLimiterPostGain(snapshot.limiterPostGain)
+                dynamicsManager.limiterEnabled = snapshot.limiterEnabled
+                dynamicsManager.limiterAttackMs = snapshot.limiterAttack
+                dynamicsManager.limiterReleaseMs = snapshot.limiterRelease
+                dynamicsManager.limiterRatio = snapshot.limiterRatio
+                dynamicsManager.limiterThresholdDb = snapshot.limiterThreshold
+                dynamicsManager.limiterPostGainDb = snapshot.limiterPostGain
+                dynamicsManager.pushLimiterUpdate()
+            }
         } catch (_: Exception) { }
     }
 

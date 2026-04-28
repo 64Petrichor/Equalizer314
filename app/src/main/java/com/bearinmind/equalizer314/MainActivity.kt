@@ -1735,22 +1735,24 @@ class MainActivity : AppCompatActivity() {
         val prefs = eqPrefs
         if (!com.bearinmind.equalizer314.autopreset.AutoPresetManager.isEnabled(prefs)) return
 
-        // Case 1: a pending preset was written by the receiver / service
-        val pending = prefs.getAutoPresetPending()
+        // Case 1: a pending preset was written by the receiver / service while the app was away.
+        val pending = prefs.getAutoPresetPendingPair()
         if (pending != null) {
-            prefs.saveAutoPresetPending(null)
-            applyAutoPresetByName(pending)
+            val pendingDeviceId = prefs.getAutoPresetPendingDeviceId()
+            prefs.clearAutoPresetPending()
+            prefs.saveAutoPresetPendingDeviceId(null)
+            prefs.saveAutoPresetActiveDeviceId(pendingDeviceId)
+            applyAutoPreset(pending.first, pending.second)
             return
         }
 
-        // Case 2: reconcile from current routing (e.g. BT was already connected
-        // when the app launched, before EqService had a chance to register its callback,
-        // or the device was connected while the app was backgrounded without EQ running).
-        // This also creates new entries for devices not yet in the list.
+        // Case 2: reconcile from current routing. Skip devices that are already active
+        // (user may have tweaked EQ manually — don't undo their changes on resume).
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
             val audioManager = getSystemService(android.media.AudioManager::class.java)
             val outputs = audioManager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
-            var anyNew = false
+            val activeDeviceId = prefs.getAutoPresetActiveDeviceId()
+            var applied = false
             for (info in outputs) {
                 val (candidateId, candidateName) = when (info.type) {
                     android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
@@ -1767,21 +1769,28 @@ class MainActivity : AppCompatActivity() {
                     // USB DAC id needs VID/PID from UsbDevice (manifest receiver handles this)
                     else -> continue
                 }
-                // Register new device (no-op if already in list)
-                val presetToApply = com.bearinmind.equalizer314.autopreset.AutoPresetManager
+                // If this device's preset was already applied this session, skip it.
+                if (candidateId == activeDeviceId) continue
+                val result = com.bearinmind.equalizer314.autopreset.AutoPresetManager
                     .onDeviceConnected(prefs, candidateId, candidateName)
-                if (presetToApply != null && !anyNew) {
-                    anyNew = true
-                    applyAutoPresetByName(presetToApply)
-                } else if (presetToApply == null) {
-                    // Device was already known but may have been seeded this run
-                    anyNew = true
+                if (result != null && !applied) {
+                    applied = true
+                    prefs.clearAutoPresetPending()
+                    prefs.saveAutoPresetPendingDeviceId(null)
+                    prefs.saveAutoPresetActiveDeviceId(candidateId)
+                    applyAutoPreset(result.first.name, result.second)
                 }
             }
         }
     }
 
-    private fun applyAutoPresetByName(name: String) {
+    /** Apply an auto preset by action name and preset name. "SNAPSHOT" loads a full config
+     *  (bands + preamp + MBC + limiter); anything else loads an imported APO text preset. */
+    private fun applyAutoPreset(action: String, name: String) {
+        if (action == "SNAPSHOT") applySnapshotPreset(name) else applyImportPreset(name)
+    }
+
+    private fun applyImportPreset(name: String) {
         val rawText = eqPrefs.getImportedPresetText(name) ?: return
         val profile = com.bearinmind.equalizer314.autoeq.AutoEqParser.parse(rawText) ?: return
         val bands = profile.filters.map { f ->
@@ -1800,6 +1809,47 @@ class MainActivity : AppCompatActivity() {
         stateManager.pushEqUpdate()
         eqGraphView.updateBandLevels()
         stateManager.updateDpBandVisualization(eqGraphView)
+    }
+
+    private fun applySnapshotPreset(name: String) {
+        val json = eqPrefs.getFullSnapshot(name) ?: return
+        val snapshot = com.bearinmind.equalizer314.autopreset.FullSnapshotData.fromJson(json) ?: return
+        val specs = snapshot.toBandSpecs()
+        stateManager.applyPresetEqs(false, specs, specs, specs)
+        eqPrefs.savePresetName(name)
+        eqPrefs.savePreampGain(snapshot.preampGain)
+        stateManager.preampGainDb = snapshot.preampGain
+        stateManager.pushEqUpdate()
+        eqGraphView.updateBandLevels()
+        stateManager.updateDpBandVisualization(eqGraphView)
+        // MBC
+        if (snapshot.mbcEnabled) {
+            eqPrefs.saveMbcEnabled(true)
+            eqPrefs.saveMbcBandCount(snapshot.mbcBandCount)
+            snapshot.mbcBands.forEachIndexed { i, b ->
+                val cutoff = snapshot.mbcCrossovers.getOrElse(i) { 1000f }
+                eqPrefs.saveMbcBand(i, b.enabled, cutoff, b.attack, b.release, b.ratio,
+                    b.threshold, b.knee, b.noiseGate, b.expander, b.preGain, b.postGain, b.range)
+            }
+            stateManager.eqService?.updateMbc(snapshot.mbcBandParams(), snapshot.mbcCrossoversArray())
+        }
+        // Limiter
+        if (snapshot.limiterEnabled) {
+            eqPrefs.saveLimiterEnabled(true)
+            eqPrefs.saveLimiterAttack(snapshot.limiterAttack)
+            eqPrefs.saveLimiterRelease(snapshot.limiterRelease)
+            eqPrefs.saveLimiterRatio(snapshot.limiterRatio)
+            eqPrefs.saveLimiterThreshold(snapshot.limiterThreshold)
+            eqPrefs.saveLimiterPostGain(snapshot.limiterPostGain)
+            val dm = stateManager.eqService?.dynamicsManager ?: return
+            dm.limiterEnabled = snapshot.limiterEnabled
+            dm.limiterAttackMs = snapshot.limiterAttack
+            dm.limiterReleaseMs = snapshot.limiterRelease
+            dm.limiterRatio = snapshot.limiterRatio
+            dm.limiterThresholdDb = snapshot.limiterThreshold
+            dm.limiterPostGainDb = snapshot.limiterPostGain
+            dm.pushLimiterUpdate()
+        }
     }
 
     private fun updateAutoEqStatus() {

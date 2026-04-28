@@ -11,6 +11,9 @@ class EqPreferencesManager(context: Context) {
 
     private val prefs = context.getSharedPreferences("eq_settings", Context.MODE_PRIVATE)
 
+    /** Returns the raw bands JSON string currently saved in prefs (for snapshot capture). */
+    fun getBandsJson(): String = prefs.getString("bands", null) ?: "[]"
+
     fun saveState(eq: ParametricEqualizer, slots: List<Int>? = null) {
         val bandsJson = JSONArray()
         for (i in 0 until eq.getBandCount()) {
@@ -477,11 +480,56 @@ class EqPreferencesManager(context: Context) {
     fun saveAutoPresetDevices(devicesJson: String) { prefs.edit().putString("autoPreset_devices", devicesJson).apply() }
     fun getAutoPresetDevices(): String? = prefs.getString("autoPreset_devices", null)
 
-    fun saveAutoPresetPending(presetName: String?) {
-        if (presetName == null) prefs.edit().remove("autoPreset_pendingPreset").apply()
-        else prefs.edit().putString("autoPreset_pendingPreset", presetName).apply()
+    /** Write a pending preset in "ACTION:name" format, e.g. "IMPORT:HD600" or "SNAPSHOT:My Config". */
+    fun saveAutoPresetPending(action: String, name: String) {
+        prefs.edit().putString("autoPreset_pendingPreset", "$action:$name").apply()
     }
-    fun getAutoPresetPending(): String? = prefs.getString("autoPreset_pendingPreset", null)
+    fun clearAutoPresetPending() { prefs.edit().remove("autoPreset_pendingPreset").apply() }
+    /** Returns (action, name) pair, with backward-compat fallback to "IMPORT" for old plain-name entries. */
+    fun getAutoPresetPendingPair(): Pair<String, String>? {
+        val raw = prefs.getString("autoPreset_pendingPreset", null) ?: return null
+        val idx = raw.indexOf(':')
+        return if (idx > 0) raw.substring(0, idx) to raw.substring(idx + 1)
+        else "IMPORT" to raw
+    }
+
+    /** Device ID stored alongside the pending preset so callers can promote it to activeDeviceId. */
+    fun saveAutoPresetPendingDeviceId(id: String?) {
+        if (id == null) prefs.edit().remove("autoPreset_pendingDeviceId").apply()
+        else prefs.edit().putString("autoPreset_pendingDeviceId", id).apply()
+    }
+    fun getAutoPresetPendingDeviceId(): String? = prefs.getString("autoPreset_pendingDeviceId", null)
+
+    /** Tracks which device's preset is currently applied — prevents reapply on onResume. Null = none. */
+    fun saveAutoPresetActiveDeviceId(id: String?) {
+        if (id == null) prefs.edit().remove("autoPreset_activeDeviceId").apply()
+        else prefs.edit().putString("autoPreset_activeDeviceId", id).apply()
+    }
+    fun getAutoPresetActiveDeviceId(): String? = prefs.getString("autoPreset_activeDeviceId", null)
+
+    // Full snapshots — complete EQ config (bands + preamp + MBC + limiter) stored by name.
+    fun saveFullSnapshot(name: String, json: String) {
+        val names = getFullSnapshotNames().toMutableList()
+        if (name !in names) names.add(0, name)
+        prefs.edit()
+            .putString("snapshot_names", org.json.JSONArray(names).toString())
+            .putString("snapshot_$name", json)
+            .apply()
+    }
+    fun getFullSnapshot(name: String): String? = prefs.getString("snapshot_$name", null)
+    fun removeFullSnapshot(name: String) {
+        val names = getFullSnapshotNames().toMutableList()
+        names.remove(name)
+        prefs.edit()
+            .putString("snapshot_names", org.json.JSONArray(names).toString())
+            .remove("snapshot_$name")
+            .apply()
+    }
+    fun getFullSnapshotNames(): List<String> {
+        val str = prefs.getString("snapshot_names", null) ?: return emptyList()
+        val arr = org.json.JSONArray(str)
+        return (0 until arr.length()).map { arr.getString(it) }
+    }
 
     // Simple EQ Presets
     fun getSimpleEqPresetNames(): List<String> {
