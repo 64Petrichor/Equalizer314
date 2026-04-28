@@ -470,6 +470,19 @@ class EqPreferencesManager(context: Context) {
     fun saveRightChannelGainDb(db: Float) { prefs.edit().putFloat("rightChannelGainDb", db).apply() }
     fun getRightChannelGainDb(): Float = prefs.getFloat("rightChannelGainDb", 0f)
 
+    // Auto Preset
+    fun saveAutoPresetEnabled(enabled: Boolean) { prefs.edit().putBoolean("autoPreset_enabled", enabled).apply() }
+    fun getAutoPresetEnabled(): Boolean = prefs.getBoolean("autoPreset_enabled", false)
+
+    fun saveAutoPresetDevices(devicesJson: String) { prefs.edit().putString("autoPreset_devices", devicesJson).apply() }
+    fun getAutoPresetDevices(): String? = prefs.getString("autoPreset_devices", null)
+
+    fun saveAutoPresetPending(presetName: String?) {
+        if (presetName == null) prefs.edit().remove("autoPreset_pendingPreset").apply()
+        else prefs.edit().putString("autoPreset_pendingPreset", presetName).apply()
+    }
+    fun getAutoPresetPending(): String? = prefs.getString("autoPreset_pendingPreset", null)
+
     // Simple EQ Presets
     fun getSimpleEqPresetNames(): List<String> {
         return (prefs.getStringSet("simple_preset_names", emptySet()) ?: emptySet()).sorted()

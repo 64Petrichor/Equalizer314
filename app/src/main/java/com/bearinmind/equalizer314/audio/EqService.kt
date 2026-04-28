@@ -1,19 +1,26 @@
 package com.bearinmind.equalizer314.audio
 
 import android.app.*
+import android.bluetooth.BluetoothDevice
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.core.app.NotificationCompat
 import com.bearinmind.equalizer314.MainActivity
 import com.bearinmind.equalizer314.R
+import com.bearinmind.equalizer314.autopreset.AutoPresetManager
+import com.bearinmind.equalizer314.autopreset.PresetAction
 import com.bearinmind.equalizer314.dsp.ParametricEqualizer
+import com.bearinmind.equalizer314.state.EqPreferencesManager
 
 class EqService : Service() {
 
@@ -40,12 +47,65 @@ class EqService : Service() {
 
     val dynamicsManager = DynamicsProcessingManager()
     private val binder = EqBinder()
+    private lateinit var eqPrefs: EqPreferencesManager
 
     // Volume change listener
     private val volumeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             updateNotification()
         }
+    }
+
+    // Auto Preset — local broadcast from AudioDeviceReceiver (wired/USB)
+    private val autoPresetReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            applyPendingAutoPreset()
+        }
+    }
+
+    // Auto Preset — dynamic callback for Bluetooth events (cannot be declared
+    // in manifest on API 26+)
+    private val btReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!AutoPresetManager.isEnabled(eqPrefs)) return
+            if (intent?.action != BluetoothDevice.ACTION_ACL_CONNECTED) return
+            val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            }
+            device ?: return
+            val address = device.address ?: return
+            val id = AutoPresetManager.btDeviceId(address)
+            val name = AutoPresetManager.btDisplayName(this@EqService, address)
+            AutoPresetManager.onDeviceConnected(eqPrefs, id, name)
+            applyPendingAutoPreset()
+        }
+    }
+
+    private fun applyPendingAutoPreset() {
+        val presetName = eqPrefs.getAutoPresetPending() ?: return
+        eqPrefs.saveAutoPresetPending(null)
+        val rawText = eqPrefs.getImportedPresetText(presetName) ?: return
+        try {
+            val profile = com.bearinmind.equalizer314.autoeq.AutoEqParser.parse(rawText) ?: return
+            val eq = ParametricEqualizer()
+            eq.clearBands()
+            for (f in profile.filters) {
+                val filterType = com.bearinmind.equalizer314.autoeq.apoTokenToFilterType(f.filterType)
+                eq.addBand(f.frequency, f.gain, filterType, f.q.toDouble())
+            }
+            eq.isEnabled = true
+            // Persist so MainActivity.onResume restores the correct UI state.
+            val slots = (0 until eq.getBandCount()).toList()
+            eqPrefs.saveState(eq, slots)
+            eqPrefs.savePreampGain(profile.preampDb)
+            eqPrefs.savePresetName(presetName)
+            eqPrefs.saveChannelSideEqEnabled(false)
+            eqPrefs.clearLeftRightBands()
+            dynamicsManager.updateFromEqualizer(eq)
+        } catch (_: Exception) { }
     }
 
     inner class EqBinder : Binder() {
@@ -56,6 +116,7 @@ class EqService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        eqPrefs = EqPreferencesManager(this)
         createNotificationChannel()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(
@@ -63,12 +124,25 @@ class EqService : Service() {
                 IntentFilter("android.media.VOLUME_CHANGED_ACTION"),
                 RECEIVER_NOT_EXPORTED
             )
+            registerReceiver(
+                btReceiver,
+                IntentFilter(BluetoothDevice.ACTION_ACL_CONNECTED),
+                RECEIVER_NOT_EXPORTED
+            )
         } else {
             registerReceiver(
                 volumeReceiver,
                 IntentFilter("android.media.VOLUME_CHANGED_ACTION")
             )
+            registerReceiver(
+                btReceiver,
+                IntentFilter(BluetoothDevice.ACTION_ACL_CONNECTED)
+            )
         }
+        LocalBroadcastManager.getInstance(this).registerReceiver(
+            autoPresetReceiver,
+            IntentFilter(AutoPresetManager.ACTION_DEVICE_CHANGED)
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -114,6 +188,8 @@ class EqService : Service() {
 
     override fun onDestroy() {
         try { unregisterReceiver(volumeReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(btReceiver) } catch (_: Exception) {}
+        LocalBroadcastManager.getInstance(this).unregisterReceiver(autoPresetReceiver)
         dynamicsManager.stop()
         Log.d(TAG, "EqService destroyed")
         super.onDestroy()

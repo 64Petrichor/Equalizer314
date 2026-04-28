@@ -1724,6 +1724,75 @@ class MainActivity : AppCompatActivity() {
 
     // ---- Settings ----
 
+    /**
+     * Called on every onResume. Checks whether Auto Preset wrote a pending
+     * preset (via BroadcastReceiver or EqService) while the app was in the
+     * background or not yet open, and applies it to the live EQ state + UI.
+     * Also handles the "device already connected when app opens" case by
+     * querying the current audio routing.
+     */
+    private fun reconcileAutoPreset() {
+        val prefs = eqPrefs
+        if (!com.bearinmind.equalizer314.autopreset.AutoPresetManager.isEnabled(prefs)) return
+
+        // Case 1: a pending preset was written by the receiver / service
+        val pending = prefs.getAutoPresetPending()
+        if (pending != null) {
+            prefs.saveAutoPresetPending(null)
+            applyAutoPresetByName(pending)
+            return
+        }
+
+        // Case 2: reconcile from current routing (e.g. BT was already connected
+        // when the app launched, before EqService had a chance to register its callback)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            val audioManager = getSystemService(android.media.AudioManager::class.java)
+            val outputs = audioManager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
+            val devices = com.bearinmind.equalizer314.autopreset.AutoPresetManager.getDevices(prefs)
+            for (info in outputs) {
+                val candidateId = when (info.type) {
+                    android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ->
+                        info.address?.takeIf { it.isNotBlank() }?.let {
+                            com.bearinmind.equalizer314.autopreset.AutoPresetManager.btDeviceId(it)
+                        }
+                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired_3.5mm"
+                    android.media.AudioDeviceInfo.TYPE_USB_DEVICE,
+                    android.media.AudioDeviceInfo.TYPE_USB_HEADSET -> null // USB DAC — id needs UsbDevice; skip here
+                    else -> null
+                } ?: continue
+                val device = devices.firstOrNull { it.id == candidateId } ?: continue
+                if (!device.hidden && device.presetAction != com.bearinmind.equalizer314.autopreset.PresetAction.FLAT
+                    && device.presetName.isNotBlank()) {
+                    applyAutoPresetByName(device.presetName)
+                    return
+                }
+            }
+        }
+    }
+
+    private fun applyAutoPresetByName(name: String) {
+        val rawText = eqPrefs.getImportedPresetText(name) ?: return
+        val profile = com.bearinmind.equalizer314.autoeq.AutoEqParser.parse(rawText) ?: return
+        val bands = profile.filters.map { f ->
+            EqStateManager.BandSpec(
+                frequency = f.frequency,
+                gain = f.gain,
+                q = f.q.toDouble(),
+                filterType = com.bearinmind.equalizer314.autoeq.apoTokenToFilterType(f.filterType),
+                enabled = true
+            )
+        }
+        stateManager.applyPresetEqs(false, bands, bands, bands)
+        eqPrefs.savePresetName(name)
+        eqPrefs.savePreampGain(profile.preampDb)
+        stateManager.preampGainDb = profile.preampDb
+        stateManager.pushEqUpdate()
+        eqGraphView.updateBandLevels()
+        stateManager.updateDpBandVisualization(eqGraphView)
+    }
+
     private fun updateAutoEqStatus() {
         val name = eqPrefs.getAutoEqName()
         val statusText = findViewById<TextView>(R.id.autoEqStatusText)
@@ -1827,6 +1896,12 @@ class MainActivity : AppCompatActivity() {
         experimentalCard.setOnClickListener {
             if (!eqPrefs.getExperimentalUnlocked()) return@setOnClickListener
             startActivity(Intent(this, ExperimentalActivity::class.java))
+            overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
+        }
+        // Auto Preset card (settings page)
+        findViewById<View>(R.id.autoPresetCard).setOnClickListener {
+            startActivity(Intent(this, com.bearinmind.equalizer314.autopreset.AutoPresetActivity::class.java))
+            @Suppress("DEPRECATION")
             overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
         }
         // AutoEQ card (settings page)
@@ -3362,6 +3437,7 @@ class MainActivity : AppCompatActivity() {
         com.bearinmind.equalizer314.ui.BottomNavHelper.updateStatus(this, eqPrefs)
         updateAutoEqStatus()
         updateTargetStatus()
+        reconcileAutoPreset()
 
         // Check if Simple EQ was toggled in experimental settings
         val simpleEqEnabled = eqPrefs.getSimpleEqEnabled()
