@@ -64,60 +64,47 @@ class EqService : Service() {
         }
     }
 
-    // Auto Preset — covers wired and Bluetooth device connects when the
-    // service is running. ACTION_HEADSET_PLUG cannot be received by manifest
-    // receivers on API 26+, and Bluetooth implicit broadcasts are also
-    // restricted — AudioDeviceCallback handles both correctly.
+    // Auto Preset — AudioDeviceCallback handles all device changes while the
+    // service is running. On any change we pick the highest-priority active
+    // output device and apply its preset (BT > USB > wired > speaker).
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<AudioDeviceInfo>) {
             if (!AutoPresetManager.isEnabled(eqPrefs)) return
-            var anyHasPreset = false
+            // Register every new device so it appears in the settings list
             for (info in addedDevices) {
-                val (id, name) = deviceInfoToIdAndName(info) ?: continue
-                val result = AutoPresetManager.onDeviceConnected(eqPrefs, id, name)
-                if (result != null) anyHasPreset = true
+                val (id, name) = AutoPresetManager.deviceInfoToIdAndName(this@EqService, info) ?: continue
+                AutoPresetManager.registerDevice(eqPrefs, id, name)
             }
-            if (anyHasPreset) applyPendingAutoPreset()
+            applyActiveDevicePreset()
         }
 
         override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) {
             if (!AutoPresetManager.isEnabled(eqPrefs)) return
-            val activeId = eqPrefs.getAutoPresetActiveDeviceId() ?: return
-            for (info in removedDevices) {
-                val (id, _) = deviceInfoToIdAndName(info) ?: continue
-                if (id == activeId) {
-                    eqPrefs.saveAutoPresetActiveDeviceId(null)
-                    break
-                }
-            }
+            applyActiveDevicePreset()
         }
     }
 
-    private fun deviceInfoToIdAndName(info: AudioDeviceInfo): Pair<String, String>? {
-        return when (info.type) {
-            AudioDeviceInfo.TYPE_WIRED_HEADSET,
-            AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired_3.5mm" to "Wired 3.5mm"
-            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> {
-                val address = try { info.address?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
-                val productName = info.productName?.toString()?.trim()?.takeIf { it.isNotBlank() }
-                val id = if (!address.isNullOrBlank()) AutoPresetManager.btDeviceId(address)
-                          else productName?.let { "bt_named:$it" } ?: return null
-                val name = productName ?: address ?: "Bluetooth Device"
-                id to name
-            }
-            // USB devices are handled by the manifest AudioDeviceReceiver which
-            // has access to VID/PID via UsbDevice. Skip here to avoid creating
-            // a duplicate entry with a different key.
-            else -> null
+    /** Queries current output devices, picks the highest-priority one, and applies
+     *  its preset — unless it is already the active device for this session. */
+    private fun applyActiveDevicePreset() {
+        val outputs = getSystemService(AudioManager::class.java)
+            .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        val (id, name) = AutoPresetManager.pickActiveDevice(this, outputs) ?: return
+        if (id == eqPrefs.getAutoPresetActiveDeviceId()) return
+        val result = AutoPresetManager.onDeviceConnected(eqPrefs, id, name)
+        if (result != null) {
+            applyPendingAutoPreset()
+        } else {
+            // Device has no preset (FLAT) — still update active ID so we don't
+            // keep triggering on every subsequent onResume.
+            eqPrefs.saveAutoPresetActiveDeviceId(id)
         }
     }
 
     private fun applyPendingAutoPreset() {
         val (action, name) = eqPrefs.getAutoPresetPendingPair() ?: return
         val deviceId = eqPrefs.getAutoPresetPendingDeviceId()
-        eqPrefs.clearAutoPresetPending()
-        eqPrefs.saveAutoPresetPendingDeviceId(null)
+        eqPrefs.clearAutoPresetPendingFull()
         eqPrefs.saveAutoPresetActiveDeviceId(deviceId)
         if (action == "SNAPSHOT") applySnapshot(name) else applyImportPreset(name)
     }

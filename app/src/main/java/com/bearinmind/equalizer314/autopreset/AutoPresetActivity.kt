@@ -202,7 +202,7 @@ class AutoPresetActivity : AppCompatActivity() {
 
     private fun showPresetOptions(device: AutoPresetDevice) {
         val options = arrayOf(
-            "No effect",
+            "No preset",
             "Choose preset",
             "Save current EQ as snapshot",
             "Prompt with each connect",
@@ -236,7 +236,7 @@ class AutoPresetActivity : AppCompatActivity() {
             .setMessage("Saves the current EQ, preamp, MBC, and limiter settings.")
             .setView(input)
             .setPositiveButton("Save") { _, _ ->
-                val name = input.text.toString().trim()
+                val name = input.text.toString().trim().take(200)
                 if (name.isBlank()) {
                     Toast.makeText(this, "Name cannot be empty", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
@@ -296,7 +296,7 @@ class AutoPresetActivity : AppCompatActivity() {
             .setTitle("Rename device")
             .setView(input)
             .setPositiveButton("Rename") { _, _ ->
-                val name = input.text.toString().trim()
+                val name = input.text.toString().trim().take(200)
                 if (name.isNotBlank()) { device.displayName = name; save() }
             }
             .setNegativeButton("Cancel", null)
@@ -304,7 +304,7 @@ class AutoPresetActivity : AppCompatActivity() {
     }
 
     private fun presetSummary(device: AutoPresetDevice): String = when (device.presetAction) {
-        PresetAction.FLAT -> "No effect"
+        PresetAction.FLAT -> "No preset"
         PresetAction.PROMPT -> "Prompt with each connect"
         PresetAction.AUTOEQ, PresetAction.IMPORT, PresetAction.SNAPSHOT ->
             device.presetName.takeIf { it.isNotBlank() } ?: "Not set"

@@ -480,23 +480,26 @@ class EqPreferencesManager(context: Context) {
     fun saveAutoPresetDevices(devicesJson: String) { prefs.edit().putString("autoPreset_devices", devicesJson).apply() }
     fun getAutoPresetDevices(): String? = prefs.getString("autoPreset_devices", null)
 
-    /** Write a pending preset in "ACTION:name" format, e.g. "IMPORT:HD600" or "SNAPSHOT:My Config". */
-    fun saveAutoPresetPending(action: String, name: String) {
-        prefs.edit().putString("autoPreset_pendingPreset", "$action:$name").apply()
+    /** Atomically write pending preset (as "ACTION:name") and its device ID in one commit. */
+    fun saveAutoPresetPendingFull(action: String, name: String, deviceId: String) {
+        prefs.edit()
+            .putString("autoPreset_pendingPreset", "$action:$name")
+            .putString("autoPreset_pendingDeviceId", deviceId)
+            .apply()
     }
-    fun clearAutoPresetPending() { prefs.edit().remove("autoPreset_pendingPreset").apply() }
+    /** Atomically clear both the pending preset and its device ID. */
+    fun clearAutoPresetPendingFull() {
+        prefs.edit()
+            .remove("autoPreset_pendingPreset")
+            .remove("autoPreset_pendingDeviceId")
+            .apply()
+    }
     /** Returns (action, name) pair, with backward-compat fallback to "IMPORT" for old plain-name entries. */
     fun getAutoPresetPendingPair(): Pair<String, String>? {
         val raw = prefs.getString("autoPreset_pendingPreset", null) ?: return null
         val idx = raw.indexOf(':')
         return if (idx > 0) raw.substring(0, idx) to raw.substring(idx + 1)
         else "IMPORT" to raw
-    }
-
-    /** Device ID stored alongside the pending preset so callers can promote it to activeDeviceId. */
-    fun saveAutoPresetPendingDeviceId(id: String?) {
-        if (id == null) prefs.edit().remove("autoPreset_pendingDeviceId").apply()
-        else prefs.edit().putString("autoPreset_pendingDeviceId", id).apply()
     }
     fun getAutoPresetPendingDeviceId(): String? = prefs.getString("autoPreset_pendingDeviceId", null)
 

@@ -2,12 +2,14 @@ package com.bearinmind.equalizer314.autopreset
 
 import android.content.Context
 import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
+import android.media.AudioDeviceInfo
 import android.os.Build
 import com.bearinmind.equalizer314.state.EqPreferencesManager
 
 /**
  * Shared logic for loading and persisting the Auto Preset device list.
- * Called from AudioDeviceReceiver (wired/USB) and EqService (Bluetooth).
+ * Also owns device-detection helpers used by both EqService and MainActivity.
  */
 object AutoPresetManager {
 
@@ -28,9 +30,18 @@ object AutoPresetManager {
         prefs.saveAutoPresetDevices(devices.toJsonString())
     }
 
+    /** Ensures [deviceId] exists in the device list without writing a pending preset. */
+    fun registerDevice(prefs: EqPreferencesManager, deviceId: String, displayName: String) {
+        val devices = getDevices(prefs)
+        if (devices.none { it.id == deviceId }) {
+            devices.add(AutoPresetDevice(deviceId, typeFromId(deviceId), displayName))
+            saveDevices(prefs, devices)
+        }
+    }
+
     /**
-     * Called when a device connects. Finds or creates its entry, writes the
-     * pending preset key (as "ACTION:name"), and returns (action, name) to
+     * Called when a device becomes the active output. Finds or creates its entry,
+     * atomically writes the pending preset key, and returns (action, name) to
      * apply — or null when no preset should be applied (Flat / hidden / unset).
      */
     fun onDeviceConnected(
@@ -43,16 +54,14 @@ object AutoPresetManager {
         val device = if (existing >= 0) {
             devices[existing]
         } else {
-            val type = typeFromId(deviceId)
-            val new = AutoPresetDevice(deviceId, type, displayName)
+            val new = AutoPresetDevice(deviceId, typeFromId(deviceId), displayName)
             devices.add(new)
             saveDevices(prefs, devices)
             new
         }
 
         if (device.hidden) {
-            prefs.clearAutoPresetPending()
-            prefs.saveAutoPresetPendingDeviceId(null)
+            prefs.clearAutoPresetPendingFull()
             return null
         }
 
@@ -65,13 +74,89 @@ object AutoPresetManager {
         }
 
         if (result != null) {
-            prefs.saveAutoPresetPending(result.first.name, result.second)
-            prefs.saveAutoPresetPendingDeviceId(deviceId)
+            prefs.saveAutoPresetPendingFull(result.first.name, result.second, deviceId)
         } else {
-            prefs.clearAutoPresetPending()
-            prefs.saveAutoPresetPendingDeviceId(null)
+            prefs.clearAutoPresetPendingFull()
         }
         return result
+    }
+
+    /**
+     * Maps an [AudioDeviceInfo] to an (id, displayName) pair. Returns null for
+     * types that cannot be identified (e.g. built-in mic, unknown peripherals).
+     * USB audio is resolved against [UsbManager] to obtain VID/PID.
+     */
+    fun deviceInfoToIdAndName(context: Context, info: AudioDeviceInfo): Pair<String, String>? {
+        return when (info.type) {
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> {
+                val address = try { info.address?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
+                val productName = info.productName?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                val id = if (!address.isNullOrBlank()) btDeviceId(address)
+                          else productName?.let { "bt_named:$it" } ?: return null
+                id to (productName ?: address ?: "Bluetooth Device")
+            }
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired_3.5mm" to "Wired 3.5mm"
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_USB_DEVICE -> {
+                val productName = info.productName?.toString()?.trim()
+                resolveUsbDevice(context, productName)
+            }
+            AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "speaker" to "Phone Speaker"
+            else -> null
+        }
+    }
+
+    /**
+     * Returns (id, displayName) for the highest-priority currently connected
+     * output device: BT > USB audio > wired > built-in speaker.
+     */
+    fun pickActiveDevice(context: Context, outputs: Array<AudioDeviceInfo>): Pair<String, String>? {
+        // 1. Bluetooth — highest priority for media audio
+        outputs.firstOrNull {
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+            it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        }?.let { return deviceInfoToIdAndName(context, it) }
+
+        // 2. USB audio — matched via UsbManager to get VID/PID
+        outputs.firstOrNull {
+            it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+            it.type == AudioDeviceInfo.TYPE_USB_DEVICE
+        }?.let { info ->
+            val productName = info.productName?.toString()?.trim()
+            resolveUsbDevice(context, productName)?.let { return it }
+        }
+
+        // 3. Wired headphones / headset
+        if (outputs.any {
+            it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+            it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+        }) return "wired_3.5mm" to "Wired 3.5mm"
+
+        // 4. Built-in speaker — always present as fallback
+        if (outputs.any { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }) {
+            return "speaker" to "Phone Speaker"
+        }
+
+        return null
+    }
+
+    private fun resolveUsbDevice(context: Context, productName: String?): Pair<String, String>? {
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager ?: return null
+        val match = usbManager.deviceList.values.firstOrNull { ud ->
+            isAudioUsbDevice(ud) &&
+            (productName == null || ud.productName?.trim() == productName)
+        } ?: return null
+        return usbDeviceId(match) to usbDisplayName(match)
+    }
+
+    private fun isAudioUsbDevice(device: UsbDevice): Boolean {
+        if (device.deviceClass == 0x01) return true
+        for (i in 0 until device.interfaceCount) {
+            if (device.getInterface(i).interfaceClass == 0x01) return true
+        }
+        return false
     }
 
     fun usbDeviceId(device: UsbDevice): String {

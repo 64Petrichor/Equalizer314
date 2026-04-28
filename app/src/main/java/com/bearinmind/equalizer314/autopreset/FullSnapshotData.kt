@@ -109,7 +109,7 @@ data class FullSnapshotData(
     companion object {
         fun fromJson(json: String): FullSnapshotData? = try {
             val o = JSONObject(json)
-            val bandsArr = o.getJSONArray("mbcBands")
+            val bandsArr = o.optJSONArray("mbcBands") ?: JSONArray()
             val bands = (0 until bandsArr.length()).map { i ->
                 val b = bandsArr.getJSONObject(i)
                 MbcBandSnapshot(
@@ -126,7 +126,7 @@ data class FullSnapshotData(
                     range     = b.optDouble("range", -12.0).toFloat(),
                 )
             }
-            val crossArr = o.getJSONArray("mbcCrossovers")
+            val crossArr = o.optJSONArray("mbcCrossovers") ?: JSONArray()
             val crossovers = (0 until crossArr.length()).map { crossArr.getDouble(it).toFloat() }
             FullSnapshotData(
                 bandsJson       = o.getString("bands"),

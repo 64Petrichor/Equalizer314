@@ -44,7 +44,7 @@ class AudioDeviceReceiver : BroadcastReceiver() {
                 // On detach we clear the pending preset and active device ID so
                 // the next connect applies fresh. EqService's AudioDeviceCallback
                 // handles live wired/BT removes via onAudioDevicesRemoved.
-                prefs.clearAutoPresetPending()
+                prefs.clearAutoPresetPendingFull()
                 prefs.saveAutoPresetActiveDeviceId(null)
             }
         }

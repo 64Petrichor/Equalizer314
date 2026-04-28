@@ -1735,51 +1735,33 @@ class MainActivity : AppCompatActivity() {
         val prefs = eqPrefs
         if (!com.bearinmind.equalizer314.autopreset.AutoPresetManager.isEnabled(prefs)) return
 
-        // Case 1: a pending preset was written by the receiver / service while the app was away.
+        // Case 1: EqService or manifest receiver wrote a pending preset while the app was away.
         val pending = prefs.getAutoPresetPendingPair()
         if (pending != null) {
             val pendingDeviceId = prefs.getAutoPresetPendingDeviceId()
-            prefs.clearAutoPresetPending()
-            prefs.saveAutoPresetPendingDeviceId(null)
+            prefs.clearAutoPresetPendingFull()
             prefs.saveAutoPresetActiveDeviceId(pendingDeviceId)
             applyAutoPreset(pending.first, pending.second)
             return
         }
 
-        // Case 2: reconcile from current routing. Skip devices that are already active
-        // (user may have tweaked EQ manually — don't undo their changes on resume).
+        // Case 2: Determine the current active output and apply its preset if it
+        // has changed (covers app-open with device already connected, and EqService
+        // not running). Speaker is included — it is always present as a fallback.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
             val audioManager = getSystemService(android.media.AudioManager::class.java)
             val outputs = audioManager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
-            val activeDeviceId = prefs.getAutoPresetActiveDeviceId()
-            var applied = false
-            for (info in outputs) {
-                val (candidateId, candidateName) = when (info.type) {
-                    android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                    android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> {
-                        val address = try { info.address?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
-                        val productName = info.productName?.toString()?.trim()?.takeIf { it.isNotBlank() }
-                        val id = if (!address.isNullOrBlank())
-                            com.bearinmind.equalizer314.autopreset.AutoPresetManager.btDeviceId(address)
-                        else productName?.let { "bt_named:$it" } ?: continue
-                        id to (productName ?: address ?: "Bluetooth Device")
-                    }
-                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                    android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired_3.5mm" to "Wired 3.5mm"
-                    // USB DAC id needs VID/PID from UsbDevice (manifest receiver handles this)
-                    else -> continue
-                }
-                // If this device's preset was already applied this session, skip it.
-                if (candidateId == activeDeviceId) continue
-                val result = com.bearinmind.equalizer314.autopreset.AutoPresetManager
-                    .onDeviceConnected(prefs, candidateId, candidateName)
-                if (result != null && !applied) {
-                    applied = true
-                    prefs.clearAutoPresetPending()
-                    prefs.saveAutoPresetPendingDeviceId(null)
-                    prefs.saveAutoPresetActiveDeviceId(candidateId)
-                    applyAutoPreset(result.first.name, result.second)
-                }
+            val (id, name) = com.bearinmind.equalizer314.autopreset.AutoPresetManager
+                .pickActiveDevice(this, outputs) ?: return
+            if (id == prefs.getAutoPresetActiveDeviceId()) return
+            val result = com.bearinmind.equalizer314.autopreset.AutoPresetManager
+                .onDeviceConnected(prefs, id, name)
+            if (result != null) {
+                prefs.clearAutoPresetPendingFull()
+                prefs.saveAutoPresetActiveDeviceId(id)
+                applyAutoPreset(result.first.name, result.second)
+            } else {
+                prefs.saveAutoPresetActiveDeviceId(id)
             }
         }
     }
