@@ -75,21 +75,24 @@ class EqService : Service() {
                 val (id, name) = AutoPresetManager.deviceInfoToIdAndName(this@EqService, info) ?: continue
                 AutoPresetManager.registerDevice(eqPrefs, id, name)
             }
-            applyActiveDevicePreset()
+            // Pick from addedDevices directly — querying all outputs here risks a
+            // timing race where the newly connected device isn't listed yet.
+            applyActiveDevicePreset(addedDevices)
         }
 
         override fun onAudioDevicesRemoved(removedDevices: Array<AudioDeviceInfo>) {
             if (!AutoPresetManager.isEnabled(eqPrefs)) return
-            applyActiveDevicePreset()
+            // Query remaining outputs (removed device is already gone from the list)
+            val remaining = getSystemService(AudioManager::class.java)
+                .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            applyActiveDevicePreset(remaining)
         }
     }
 
-    /** Queries current output devices, picks the highest-priority one, and applies
-     *  its preset — unless it is already the active device for this session. */
-    private fun applyActiveDevicePreset() {
-        val outputs = getSystemService(AudioManager::class.java)
-            .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        val (id, name) = AutoPresetManager.pickActiveDevice(this, outputs) ?: return
+    /** Picks the highest-priority device from [candidates] and applies its preset
+     *  unless it is already the active device for this session. */
+    private fun applyActiveDevicePreset(candidates: Array<AudioDeviceInfo>) {
+        val (id, name) = AutoPresetManager.pickActiveDevice(this, candidates) ?: return
         if (id == eqPrefs.getAutoPresetActiveDeviceId()) return
         val result = AutoPresetManager.onDeviceConnected(eqPrefs, id, name)
         if (result != null) {
